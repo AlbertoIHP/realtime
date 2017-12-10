@@ -1,0 +1,295 @@
+
+//Nos traemos la app configurada anteriormente
+//Y ademas HTTP para montar el servidor y socket.IO 
+var app = require('../app');
+var debug = require('debug')('server:server');
+var http = require('http');
+var socketio = require('socket.io');
+var mongojs = require('mongojs');
+
+//Generamos la instancia del servidor mediante HTTP
+//Y luego se la pasamos a socket.IO para escuchar
+var ObjectID = mongojs.ObjectID;
+var db = mongojs(process.env.MONGO_URL || 'mongodb://localhost:27017/local');
+var server = http.Server(app);
+var websocket = socketio(server);
+
+
+//Seteamos el puerto de escucha y se monta el servidor
+//con listen
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+// Se mapearan los objetos para poder tener acceso con SOCKET
+var clients = {};
+var users = {};
+
+// Se podrian enumerar una serie de salas de chat, en este caso solo sera 1
+var chatId = 1;
+
+
+
+
+
+
+
+
+
+
+
+
+console.log("Configurando SOCKET")
+//Se escucha el evento conexion proveniente de cualquier cliente conectado al servidor
+websocket.on('connection', (socket) => {
+    console.log("Una nueva coneccion ha sido emitida")
+
+    //Asignamos a nuestro mapeo el id del cliente, y guardamos su instancia del evento (socket)
+    clients[socket.id] = socket;
+
+    //De esta manera, quedamos escuchando a ESE CLIENTE, y cuando este realice cualquiera de 
+    //Estos eventos, entonces llamaremos a las funciones respectivas
+
+    socket.on('userJoined', (userId) => onUserJoined(userId, socket));
+    socket.on('message', (message) => onMessageReceived(message, socket));
+});
+
+
+// Esta funcion se activa cuando un usuario envia un mensaje
+function onMessageReceived(message, senderSocket) 
+{
+
+  console.log("Se ha recibido un mensaje")
+  console.log(message)
+  //Buscamos el id del usuario
+  var userId = users[senderSocket.id];
+  
+  // Si es que no se encuentra el ID del usuario entonces finalizamos la ejecucion de la funcion
+  if (!userId) return;
+
+  //Si no, entonces mandamos el mensaje
+  _sendAndSaveMessage(message, senderSocket);
+}
+
+
+
+
+
+
+
+// Esta funcion, tiene la tarea de identificar las propiedades del usuario entrante
+function onUserJoined(userId, socket) 
+{
+  console.log("He escuchado el evento del cliente que ha entrado")
+  console.log(userId)
+
+  try 
+  {
+    // Se verifica si el id del usuario es nulo
+    if (!userId) 
+    {
+      //Guardamos en la BD, en la coleccion de usuarios
+      var user = db.collection('users').insert({}, (err, user) => {
+
+        //Con la misma instancia del socket, del cliente, es que emitimos el evento y entregamos el id del usuario
+
+        console.log("Logre configurar su ID, ahora emito el evento a todos mis clientes")
+        socket.emit('userJoined', user._id);
+
+        //Se guarda dicha ID en el mapeo de usuarios
+        users[socket.id] = user._id;
+
+        //Se ejecuta la funcion de mensajes existentes para los nuevos usuarios
+        _sendExistingMessages(socket);
+
+      });
+    } 
+    else 
+    {
+      //De no serlo entonces se guardara dicha ID, en el mapeo de usuarios
+      users[socket.id] = userId;
+
+      //Se ejecuta la funcion de mensajes existentes para los nuevos usuarios
+      _sendExistingMessages(socket);
+    }
+  } 
+  catch(err) 
+  {
+    console.err(err);
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Esta funcion tiee la tarea, de revisar la BD para traer los mensajes existentes y entregarselos
+// exclusivamente al nuevo usuario logeado
+function _sendExistingMessages(socket) 
+{
+  //Esta consulta, busca los registros de la sala en cuestion (chatId), los ordena en orden de creacion
+  // y posteriormente los pasa a un arreglo JS
+  var messages = db.collection('messages')
+    .find({ chatId })
+    .sort({ createdAt: 1 })
+    .toArray((err, messages) => {
+
+      // Si no hay mensajes, entonces se finaliza la ejecucion de la funcion con un return
+      if (!messages.length) return;
+
+      // Si los hay se emiten de manera inversa para que se ordenen correctamente
+      socket.emit('message', messages.reverse());
+  });
+}
+
+
+
+
+
+
+// Esta funcion tiene la tarea de enviar el mensaje a todos los clientes conectados
+// recibe tres parametros, y el ultimo de estos asume que es el servidor quien envia el mensaje
+// cuando esta en true
+function _sendAndSaveMessage(message, socket, fromServer) 
+{
+
+  // Se setea la informacion del mensaje a un esquema para poder guardarlo en la BD
+  var messageData = {
+    text: message.text,
+    user: message.user,
+    createdAt: new Date(message.createdAt),
+    chatId: chatId
+  };
+
+  //Se guarda en la coleccion de mensajes
+  db.collection('messages').insert(messageData, (err, message) => {
+
+    // Esta variable emitira el evento a todos los usuarios, si es del servidor
+    // sera un puntero de la instancia de websocket, si no lo es, entonces sera un puntero
+    // de la instancia de broadcast
+    var emitter = fromServer ? websocket : socket.broadcast;
+
+    //Finalmente se emite el mensaje
+    emitter.emit('message', [message]);
+
+  });
+}
+
+
+
+
+
+// Allow the server to participate in the chatroom through stdin.
+var stdin = process.openStdin();
+stdin.addListener('data', function(d) {
+  _sendAndSaveMessage({
+    text: d.toString().trim(),
+    createdAt: new Date(),
+    user: { _id: 'robot' }
+  }, null /* no socket */, true /* send from server */);
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Funciones de validaciones
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
